@@ -1,0 +1,12 @@
+{
+  "name": "express-demo",
+  "version": "1.0.0",
+  "description": "MyCloud Express Backend Demo",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

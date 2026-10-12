@@ -1,0 +1,13 @@
+{
+  "vercel": {
+    "accessToken": "tu-vercel-access-token-aqui",
+    "teamId": "tu-team-id-aqui (opcional)",
+    "defaultEnv": {
+      "NODE_ENV": "production"
+    }
+  },
+  "mycloud": {
+    "apiUrl": "http://localhost:3001",
+    "frontendUrl": "http://localhost:5173"
+  }
+}

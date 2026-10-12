@@ -1,0 +1,9 @@
+{
+  "name": "failing-demo",
+  "version": "1.0.0",
+  "description": "Demonstrates strict failure reporting on process exit code 1",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  }
+}
