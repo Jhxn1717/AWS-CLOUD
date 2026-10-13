@@ -19,19 +19,37 @@ const {
   DB_NAME = 'mycloud_platform',
   DB_USER = 'postgres',
   DB_PASSWORD = '',
+  DATABASE_URL = '',
+  DB_SSL = 'false',
   PORT_RANGE_START = '4000',
   PORT_RANGE_END = '5000',
 } = process.env;
 
-async function createDatabase(): Promise<void> {
-  // Connect to the default 'postgres' database to create ours
-  const adminClient = new Client({
+function databaseOptions(database = DB_NAME) {
+  if (DATABASE_URL) {
+    return {
+      connectionString: DATABASE_URL,
+      ssl: DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+    };
+  }
+  return {
     host: DB_HOST,
     port: parseInt(DB_PORT),
-    database: 'postgres',
+    database,
     user: DB_USER,
     password: DB_PASSWORD,
-  });
+    ssl: DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+  };
+}
+
+async function createDatabase(): Promise<void> {
+  if (DATABASE_URL) {
+    console.log('✓ Using the managed PostgreSQL database from DATABASE_URL');
+    return;
+  }
+
+  // Connect to the default 'postgres' database to create ours
+  const adminClient = new Client(databaseOptions('postgres'));
 
   try {
     await adminClient.connect();
@@ -58,13 +76,7 @@ async function createDatabase(): Promise<void> {
 }
 
 async function runSchema(): Promise<void> {
-  const client = new Client({
-    host: DB_HOST,
-    port: parseInt(DB_PORT),
-    database: DB_NAME,
-    user: DB_USER,
-    password: DB_PASSWORD,
-  });
+  const client = new Client(databaseOptions());
 
   try {
     await client.connect();

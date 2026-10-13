@@ -18,7 +18,26 @@ const {
   DB_NAME = 'mycloud_platform',
   DB_USER = 'postgres',
   DB_PASSWORD = '',
+  DATABASE_URL = '',
+  DB_SSL = 'false',
 } = process.env;
+
+function databaseOptions() {
+  if (DATABASE_URL) {
+    return {
+      connectionString: DATABASE_URL,
+      ssl: DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+    };
+  }
+  return {
+    host: DB_HOST,
+    port: parseInt(DB_PORT),
+    database: DB_NAME,
+    user: DB_USER,
+    password: DB_PASSWORD,
+    ssl: DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+  };
+}
 
 async function main(): Promise<void> {
   console.log('\n=== MyCloud Platform - Seed Admin User ===\n');
@@ -32,13 +51,7 @@ async function main(): Promise<void> {
     throw new Error('Set ADMIN_EMAIL and an ADMIN_PASSWORD of at least 12 characters in backend/.env before seeding.');
   }
 
-  const client = new Client({
-    host: DB_HOST,
-    port: parseInt(DB_PORT),
-    database: DB_NAME,
-    user: DB_USER,
-    password: DB_PASSWORD,
-  });
+  const client = new Client(databaseOptions());
 
   try {
     await client.connect();

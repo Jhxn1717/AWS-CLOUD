@@ -19,22 +19,16 @@ DB_SSL=true
 DB_POOL_MAX=5
 ```
 
-Inicializa el esquema y el administrador desde `backend/`:
+El Blueprint ejecuta `db:init` y `db:seed` una sola vez después del primer deployment. Configura `ADMIN_EMAIL` y `ADMIN_PASSWORD` como secretos antes de crear el servicio.
 
-```bash
-npm run db:init
-npm run db:seed
-```
+## 2. Backend y worker administrados (sin VPS)
 
-Configura `ADMIN_EMAIL` y `ADMIN_PASSWORD` antes del seed.
+En Render, crea un **Blueprint** desde este repositorio. El archivo `render.yaml` configura el servicio Node, el health check y el hook inicial de base de datos. Usa un plan siempre activo: el plan Free duerme y pierde su filesystem cuando se suspende, lo que puede interrumpir el procesamiento de un ZIP. El plan `1c-2g` del Blueprint es de pago; Render muestra el precio antes de confirmar la creación.
 
-## 2. Backend y worker persistentes
-
-El host del backend debe usar Node.js 20 o superior, conservar espacio temporal para extraer ZIP y mantener el proceso encendido durante el pipeline. Configura en sus variables privadas:
+El servicio debe usar Node.js 20 o superior y conservar espacio temporal mientras procesa cada ZIP. Configura los secretos solicitados por el Blueprint:
 
 ```dotenv
 NODE_ENV=production
-PORT=3001
 DATABASE_URL=postgresql://USUARIO:CLAVE@HOST:5432/BASE
 DB_SSL=true
 DB_POOL_MAX=5
@@ -57,9 +51,9 @@ Importa el repositorio y configura:
 - Root Directory: `frontend`
 - Build command: `npm run build`
 - Output directory: `dist`
-- Environment variable: `VITE_API_URL=https://api.tu-dominio.com/api`
+- Environment variable: `VITE_API_URL=https://mycloud-api.onrender.com/api` (usa la URL real que Render asignó al servicio).
 
-El origen del frontend debe coincidir con una entrada exacta de `CORS_ORIGINS` en el backend.
+El origen del frontend debe coincidir exactamente con `CORS_ORIGINS` en Render. Después de que Vercel asigne el dominio de la consola, actualiza esa variable en Render si es distinto del ejemplo.
 
 ## 4. Publicar proyectos
 
@@ -78,6 +72,6 @@ Vercel asigna el dominio `vercel.app` del proyecto. Los dominios propios/subdomi
 
 ## Comprobación
 
-- API: `https://api.tu-dominio.com/api/health`
+- API: `https://mycloud-api.onrender.com/api/health` (reemplaza por la URL real de Render).
 - Frontend: abre el dominio de producción de Vercel e inicia sesión con las credenciales configuradas en el backend.
 - Prueba primero un ZIP pequeño de Vite/React antes de usar proyectos con APIs o bases de datos propias.

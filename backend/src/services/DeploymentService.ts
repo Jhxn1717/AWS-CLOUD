@@ -658,11 +658,16 @@ export class DeploymentService {
           
           await DeploymentModel.updateStatus(depId, DeploymentStatus.RUNNING);
           await ProjectModel.updateStatus(projectId, ProjectStatus.RUNNING);
+
+          await StorageManager.deleteProject(projectId).catch(error => {
+            logger.warn(`[DeploymentService] Could not clean temporary Vercel source for ${projectId}: ${(error as Error).message}`);
+          });
           
           logger.info(`[DeploymentService] ✅ Deployment ${depId} RUNNING on Vercel: ${vercelUrl}`);
           return;
         } catch (err: unknown) {
           await failStage(DeploymentStatus.PROCESS_START, (err as Error).message);
+          await StorageManager.deleteProject(projectId).catch(() => undefined);
           return;
         }
       }

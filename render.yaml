@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: mycloud-api
+    runtime: node
+    plan: 1c-2g
+    region: oregon
+    branch: main
+    rootDir: backend
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    initialDeployHook: npm run db:init && npm run db:seed
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: VERCEL_ENABLED
+        value: "true"
+      - key: DB_SSL
+        value: "true"
+      - key: DB_POOL_MAX
+        value: "5"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: VERCEL_TOKEN
+        sync: false
+      - key: ADMIN_NAME
+        value: MyCloud Admin
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
