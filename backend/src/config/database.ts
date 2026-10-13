@@ -13,12 +13,17 @@ let pool: Pool | null = null;
 export function getPool(): Pool {
   if (!pool) {
     pool = new Pool({
-      host:     config.DB_HOST,
-      port:     config.DB_PORT,
-      database: config.DB_NAME,
-      user:     config.DB_USER,
-      password: config.DB_PASSWORD,
-      max:      20,               // max connections in pool
+      ...(config.DATABASE_URL
+        ? { connectionString: config.DATABASE_URL }
+        : {
+            host: config.DB_HOST,
+            port: config.DB_PORT,
+            database: config.DB_NAME,
+            user: config.DB_USER,
+            password: config.DB_PASSWORD,
+          }),
+      ssl: config.DB_SSL ? { rejectUnauthorized: true } : undefined,
+      max: process.env.VERCEL === '1' ? Math.min(config.DB_POOL_MAX, 1) : config.DB_POOL_MAX,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
     });

@@ -75,9 +75,9 @@ export class ProjectController {
         env_vars:        envVars.filter(v => !v.is_secret),
         is_running:      isRunning,
         recent_logs:     recentLogs,
-        url:             project.assigned_port
+        url: project.assigned_port
           ? `http://localhost:${project.assigned_port}`
-          : null,
+          : /^https?:\/\//i.test(project.source_path ?? '') ? project.source_path : null,
         database: dbCreds ? {
           type:     dbCreds.db_type,
           host:     dbCreds.db_host,

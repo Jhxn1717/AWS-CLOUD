@@ -41,6 +41,13 @@ export const config = {
   DB_NAME:     optional('DB_NAME', 'mycloud_platform'),
   DB_USER:     optional('DB_USER', 'postgres'),
   DB_PASSWORD: optional('DB_PASSWORD', ''),
+  DATABASE_URL: optional('DATABASE_URL', ''),
+  DB_SSL: optional('DB_SSL', 'false') === 'true',
+  DB_POOL_MAX: optionalInt('DB_POOL_MAX', process.env.VERCEL === '1' ? 1 : 20),
+  CORS_ORIGINS: optional(
+    'CORS_ORIGINS',
+    'http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173',
+  ),
 
   // ─── Auth ──────────────────────────────────────────────────
   JWT_SECRET:     optional('JWT_SECRET', 'mycloud-dev-secret-change-in-prod'),

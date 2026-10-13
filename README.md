@@ -27,16 +27,16 @@ MyCloud es una plataforma PaaS (Platform as a Service) privada de grado de produ
   10. `RUNNING` (Aplicación en producción lista)
 - **Regla Contra Falsos Éxitos**: Si el proceso termina con código distinto de 0 o el health check falla, el despliegue se marca **inmediatamente** como `FAILED` con el error real y la salida de la consola.
 - **Consola Web Profesional**: Panel de control estilo AWS/Vercel (Dark Mode) con Dashboard de métricas, catálogo de proyectos, visualizador visual del pipeline en tiempo real, visor de logs streaming por Server-Sent Events (SSE) y gestor de variables de entorno.
-- **Persistencia PostgreSQL Dual**: Se conecta a servidores PostgreSQL externos/locales (ej. `localhost:5432`) o activa automáticamente el motor nativo de PostgreSQL 16 persistente (`PGlite`) si el servicio externo no está disponible.
+- **Persistencia PostgreSQL**: Se conecta a PostgreSQL local en desarrollo o a un proveedor administrado (Neon/Supabase) mediante `DATABASE_URL` y TLS en producción.
 
 ---
 
 ## 2. Requisitos Previos
 
 - **Sistema Operativo**: Windows 10/11 o Linux / macOS.
-- **Node.js**: v18.0.0 o superior (v22 recomendada).
+- **Node.js**: v20.0.0 o superior (v22 recomendada y requerida por Vercel CLI).
 - **npm**: v9.0.0 o superior.
-- **PostgreSQL**: Servidor PostgreSQL 14+ instalado y corriendo en `localhost:5432` (o utilizar el fallback automático persistente PGlite integrado).
+- **PostgreSQL**: PostgreSQL 14+ local para desarrollo o una base administrada compatible con `pg` (Neon/Supabase) para producción.
 - **Python**: 3.10+ (opcional, para despliegue de aplicaciones Python).
 
 ---

@@ -36,7 +36,7 @@ export default function ProjectDetail() {
     try {
       const p = await projectsApi.get(id)
       setProject(p)
-      if (p.status === 'RUNNING' && isAdmin) {
+      if (p.status === 'RUNNING' && isAdmin && !p.source_path?.startsWith('https://')) {
         const logs = await projectsApi.processLogs(id, 50)
         setProcessLogs(logs)
       }
@@ -94,8 +94,9 @@ export default function ProjectDetail() {
   if (loading) return <div className="loading-screen">Cargando proyecto…</div>
   if (!project) return <div className="loading-screen">Proyecto no encontrado</div>
 
+  const isVercelDeployment = project.source_path?.startsWith('https://') ?? false
   const canStart =
-    ['STOPPED', 'FAILED', 'CREATED'].includes(project.status) && !!project.source_path
+    ['STOPPED', 'FAILED', 'CREATED'].includes(project.status) && !!project.source_path && !isVercelDeployment
   const canStop = project.status === 'RUNNING'
   const canRestart = project.status === 'RUNNING'
   const canDeploy =
@@ -135,7 +136,7 @@ export default function ProjectDetail() {
             <Package size={18} />
             Subir proyecto
           </button>
-          {isAdmin && <>
+          {isAdmin && !isVercelDeployment && <>
             <button
               className="btn btn-success"
               onClick={() => doAction(() => projectsApi.start(project.id), 'Proyecto iniciado')}
@@ -247,14 +248,14 @@ export default function ProjectDetail() {
               <Globe size={14} />
               <label>URL</label>
               <span>
-                {project.assigned_port && project.status === 'RUNNING' ? (
+                {project.url || (project.assigned_port && project.status === 'RUNNING') ? (
                   <a
-                    href={`http://localhost:${project.assigned_port}`}
+                    href={project.url ?? `http://localhost:${project.assigned_port}`}
                     target="_blank"
                     rel="noreferrer"
                     className="url-link"
                   >
-                    http://localhost:{project.assigned_port} ↗
+                    {project.url ?? `http://localhost:${project.assigned_port}`} ↗
                   </a>
                 ) : (
                   '—'

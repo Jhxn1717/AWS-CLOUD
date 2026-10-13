@@ -117,27 +117,129 @@ class VercelDeployer {
   }
 
   /**
-   * Deploy a project to Vercel from a directory
+   * Deploys a source directory using Vercel's supported CLI and REST API.
    */
   async deployFromDirectory(projectName: string, projectPath: string, env: Record<string, string> = {}): Promise<string> {
-    logger.info('[Vercel] Deploying to Vercel...', { projectName });
+    const safeName = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 100);
+    if (!safeName) throw new Error('A valid Vercel project name could not be generated.');
 
-    // Build the project first if it's a frontend
-    const packageJsonPath = path.join(projectPath, 'package.json');
-    if (fs.existsSync(packageJsonPath)) {
-      const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-      if (pkg.scripts?.build) {
-        logger.info('[Vercel] Running build...');
-        await runCommand('npm', ['run', 'build'], projectPath, undefined, 
-          line => logger.info(`[Vercel/build] ${line}`));
-      }
+    const project = await this.getOrCreateProject(safeName);
+    const projectId = typeof project.id === 'string' ? project.id : '';
+    const orgId = this.teamId || (typeof project.accountId === 'string' ? project.accountId : '');
+    if (!projectId || !orgId) {
+      throw new Error('Vercel project metadata is incomplete; expected project and account IDs.');
     }
 
-    // For now, return a mock URL since we can't directly deploy from API
-    // In production, you would use the Vercel CLI or API
-    const mockUrl = `https://${projectName}-${Date.now()}.vercel.app`;
-    logger.info('[Vercel] Mock deployment URL:', { url: mockUrl });
-    return mockUrl;
+    const vercelDir = path.join(projectPath, '.vercel');
+    fs.mkdirSync(vercelDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(vercelDir, 'project.json'),
+      JSON.stringify({ orgId, projectId }),
+      'utf8',
+    );
+
+    await this.upsertEnvironment(projectId, env);
+
+    const cliPath = path.resolve(__dirname, '../../scripts/vercel-cli.mjs');
+    if (!fs.existsSync(cliPath)) {
+      throw new Error('Vercel CLI launcher is missing from backend/scripts.');
+    }
+
+    let output: string;
+    try {
+      output = await runCommand(
+        process.execPath,
+        [cliPath, 'deploy', '--yes', '--prod', '--no-color'],
+        projectPath,
+        {
+          VERCEL_TOKEN: this.token,
+          ...(this.teamId ? { VERCEL_ORG_ID: this.teamId } : {}),
+        },
+        line => logger.info(`[Vercel] ${line}`),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(message.split(this.token).join('[redacted]'));
+    }
+    const urls = output.match(/https:\/\/[a-z0-9][a-z0-9.-]*\.vercel\.app\b/gi);
+    const deploymentUrl = urls?.[urls.length - 1];
+    if (!deploymentUrl) {
+      throw new Error('Vercel CLI finished without returning a deployment URL.');
+    }
+
+    logger.info('[Vercel] Production deployment ready', { projectName: safeName, deploymentUrl });
+    return deploymentUrl;
+  }
+
+  private async request(pathname: string, method: string, body?: unknown, allowNotFound = false): Promise<Record<string, unknown> | null> {
+    const url = new URL(pathname, 'https://api.vercel.com');
+    if (this.teamId && !url.searchParams.has('teamId')) url.searchParams.set('teamId', this.teamId);
+    const response = await fetch(url.toString(), {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+
+    if (allowNotFound && response.status === 404) return null;
+    if (!response.ok) {
+      const error = payload.error as Record<string, unknown> | undefined;
+      const message = typeof error?.message === 'string'
+        ? error.message
+        : typeof payload.message === 'string' ? payload.message : response.statusText;
+      throw new Error(`Vercel API ${response.status}: ${message}`);
+    }
+    return payload;
+  }
+
+  private async getOrCreateProject(projectName: string): Promise<Record<string, unknown>> {
+    const projectPath = `/v9/projects/${encodeURIComponent(projectName)}`;
+    const existing = await this.request(projectPath, 'GET', undefined, true);
+    if (existing) return existing;
+
+    try {
+      const created = await this.request('/v11/projects', 'POST', { name: projectName });
+      if (created) return created;
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('409')) throw error;
+      const existingAfterConflict = await this.request(projectPath, 'GET');
+      if (existingAfterConflict) return existingAfterConflict;
+    }
+    throw new Error(`Vercel project "${projectName}" could not be created or found.`);
+  }
+
+  private async upsertEnvironment(projectId: string, env: Record<string, string>): Promise<void> {
+    const reservedKeys = new Set(['NODE_ENV', 'PORT']);
+    const variables = Object.entries(env)
+      .filter(([key, value]) => key && value !== undefined && !reservedKeys.has(key))
+      .map(([key, value]) => ({
+      key,
+      value,
+      type: /PASSWORD|SECRET|TOKEN|DATABASE_URL|PRIVATE|KEY/i.test(key) ? 'encrypted' : 'plain',
+      target: ['production', 'preview'],
+      }));
+    if (variables.length === 0) return;
+
+    const result = await this.request(
+      `/v10/projects/${encodeURIComponent(projectId)}/env?upsert=true`,
+      'POST',
+      variables,
+    );
+    const failed = result?.failed;
+    if (Array.isArray(failed) && failed.length > 0) {
+      const keys = failed.map(item => {
+        const failure = item as { error?: { key?: string; message?: string } };
+        return failure.error?.key ?? 'unknown variable';
+      });
+      throw new Error(`Vercel rejected environment variables: ${keys.join(', ')}`);
+    }
+  }
+
+  async deleteProject(projectName: string): Promise<void> {
+    await this.request(`/v9/projects/${encodeURIComponent(projectName)}`, 'DELETE', undefined, true);
   }
 }
 
@@ -397,10 +499,11 @@ export class DeploymentService {
         await startStage(DeploymentStatus.PROCESS_START);
         try {
           const vercel = new VercelDeployer(config.VERCEL_TOKEN, config.VERCEL_TEAM_ID);
+          const storedEnvVars = await EnvVarModel.toRecord(projectId);
           vercelUrl = await vercel.deployFromDirectory(
             `project-${projectId}`,
             projectPath,
-            { ...dbEnvVars, NODE_ENV: 'production' }
+            { ...storedEnvVars, ...dbEnvVars, NODE_ENV: 'production' }
           );
           await log(`[VERCEL] Deployed to: ${vercelUrl}`, LogLevel.INFO, DeploymentStatus.PROCESS_START);
           await finishStage(DeploymentStatus.PROCESS_START, vercelUrl);
@@ -718,6 +821,12 @@ export class DeploymentService {
   }
 
   static async deleteProject(projectId: string): Promise<void> {
+    const project = await ProjectModel.findById(projectId);
+    if (config.VERCEL_ENABLED === 'true' && config.VERCEL_TOKEN && /^https:\/\//i.test(project?.source_path ?? '')) {
+      const vercel = new VercelDeployer(config.VERCEL_TOKEN, config.VERCEL_TEAM_ID);
+      await vercel.deleteProject(`project-${projectId}`);
+    }
+
     await ProjectModel.updateStatus(projectId, ProjectStatus.DELETING);
 
     // Stop processes
@@ -725,7 +834,6 @@ export class DeploymentService {
     StaticServer.stop(projectId);
 
     // Release port
-    const project = await ProjectModel.findById(projectId);
     if (project?.assigned_port) {
       await PortManager.releasePort(project.assigned_port, projectId);
     }

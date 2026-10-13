@@ -28,8 +28,10 @@ const app = express();
 
 app.use(helmet({ crossOriginEmbedderPolicy: false }));
 
+const allowedOrigins = config.CORS_ORIGINS.split(',').map(origin => origin.trim()).filter(Boolean);
+
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'],
+  origin: allowedOrigins,
   credentials: true,
 }));
 

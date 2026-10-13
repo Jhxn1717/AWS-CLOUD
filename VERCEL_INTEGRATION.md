@@ -1,218 +1,83 @@
-# Guía: MyCloud + Vercel (Despliegue Web)
+# MyCloud con Vercel
 
-## ¿Qué es esto?
+## Arquitectura funcional
 
-MyCloud ahora puede desplegar proyectos directamente en **Vercel** en lugar de usar procesos locales. Esto permite que:
+- **Consola React**: desplegada en Vercel desde `frontend/`.
+- **API y worker MyCloud**: servicio Node persistente. Procesa ZIP, instala dependencias, valida builds y ejecuta Vercel CLI. No desplegar este worker como función serverless.
+- **Base de datos MyCloud**: PostgreSQL administrado en Neon o Supabase usando `DATABASE_URL` y TLS.
+- **Aplicaciones de usuarios**: un Vercel Project por proyecto MyCloud; cada deployment de producción devuelve su URL `*.vercel.app`.
 
-- ✅ Tu MyCloud se despliegue en una URL (ej: `https://tudominio.com`)
-- ✅ Cada proyecto desplegado tenga su propia URL en `vercel.app`
-- ✅ Sin necesidad de VM ni puertos locales
-- ✅ Escalabilidad automática
+PlanetScale es MySQL y no es compatible con el driver PostgreSQL actual. Vercel tampoco puede ejecutar procesos de aplicación con puertos persistentes; los proyectos subidos deben ser compatibles con los runtimes/builds de Vercel.
 
----
+## 1. PostgreSQL
 
-## Arquitectura
+Crea la base en Neon o Supabase y guarda la cadena de conexión solo en el entorno privado del backend:
 
-```
-Internet
-   │
-   ▼
-┌─────────────────────────────────────────┐
-│  MyCloud (desplegado en Vercel)         │
-│  https://tudominio.vercel.app           │
-└─────────────────────────────────────────┘
-   │
-   ├─ Login / Auth
-   ├─ Upload ZIP
-   ├─ Listar proyectos
-   │
-   ▼
-┌─────────────────────────────────────────┐
-│  Project 1 (Vercel)                     │
-│  https://proyecto1-abc123.vercel.app    │
-└─────────────────────────────────────────┘
-
-┌─────────────────────────────────────────┐
-│  Project 2 (Vercel)                     │
-│  https://proyecto2-xyz999.vercel.app    │
-└─────────────────────────────────────────┘
+```dotenv
+DATABASE_URL=postgresql://USUARIO:CLAVE@HOST:5432/BASE
+DB_SSL=true
+DB_POOL_MAX=5
 ```
 
----
-
-## Cómo Configurar
-
-### Paso 1: Obtener Token de Vercel
-
-1. Ve a [vercel.com](https://vercel.com)
-2. Inicia sesión
-3. Ve a [Account → Settings → Tokens](https://vercel.com/account/tokens)
-4. Crea un token nuevo con permisos:
-   - `Read Projects`
-   - `Read & Write Deployments`
-   - `Read Environments`
-   - `Read Teams`
-
-### Paso 2: Configurar MyCloud
-
-Crea un archivo `.env` en `mycloud/backend/`:
-
-```env
-# Habilitar Vercel
-VERCEL_ENABLED=true
-VERCEL_TOKEN=tu_token_aqui
-VERCEL_TEAM_ID=team_XXX  # opcional
-
-# Configuración normal
-PORT=3001
-DB_HOST=localhost
-DB_NAME=mycloud_platform
-...
-```
-
-### Paso 3: Iniciar MyCloud
+Inicializa el esquema y el administrador desde `backend/`:
 
 ```bash
-cd mycloud/backend
-npm run dev
+npm run db:init
+npm run db:seed
 ```
 
----
+Configura `ADMIN_EMAIL` y `ADMIN_PASSWORD` antes del seed.
 
-## Cómo Usar
+## 2. Backend y worker persistentes
 
-### 1. Desplegar un Proyecto
+El host del backend debe usar Node.js 20 o superior, conservar disco para temporales y proyectos extraídos, y mantener el proceso encendido. Configura en sus variables privadas:
 
-1. Abre `http://localhost:3000`
-2. Inicia sesión
-3. Crea un nuevo proyecto
-4. Sube tu ZIP (o usa GitHub)
-5. Haz clic en "Deploy"
-
-**Resultado:**
-- MyCloud envía el ZIP a Vercel
-- Vercel despliega el proyecto
-- MyCloud guarda la URL en la base de datos
-
-### 2. Ver tu Proyecto
-
-En la pantalla de detalle del proyecto verás:
-
-```
-URL: https://proyecto-abc123.vercel.app
+```dotenv
+NODE_ENV=production
+PORT=3001
+DATABASE_URL=postgresql://USUARIO:CLAVE@HOST:5432/BASE
+DB_SSL=true
+DB_POOL_MAX=5
+JWT_SECRET=SECRETO_ALEATORIO_LARGO
+ADMIN_NAME=MyCloud Admin
+ADMIN_EMAIL=admin@tu-dominio.com
+ADMIN_PASSWORD=CLAVE_SEGURA_DE_12_CARACTERES_O_MAS
+VERCEL_ENABLED=true
+VERCEL_TOKEN=TOKEN_PRIVADO_DE_VERCEL
+VERCEL_TEAM_ID=
+CORS_ORIGINS=https://tu-consola.vercel.app
 ```
 
-Haz clic para abrirlo.
+Crea el token en [Vercel Account Tokens](https://vercel.com/account/tokens) con permisos para crear proyectos, gestionar variables de entorno y deployments. No pongas el token ni claves en el frontend, README o GitHub.
 
-### 3. Actualizar Proyectos
+## 3. Consola React en Vercel
 
-- Vercel detecta automáticamente cambios si conectas tu repo
-- O sube un nuevo ZIP
+Importa el repositorio y configura:
 
----
+- Root Directory: `frontend`
+- Build command: `npm run build`
+- Output directory: `dist`
+- Environment variable: `VITE_API_URL=https://api.tu-dominio.com/api`
 
-## Ventajas de usar Vercel
+El origen del frontend debe coincidir con una entrada exacta de `CORS_ORIGINS` en el backend.
 
-| Característica | MyCloud Local | MyCloud + Vercel |
-|----------------|---------------|------------------|
-| URL | `localhost:4000` | `https://tudominio.com` |
-| Escalabilidad | Manual | Automática |
-| SSL |手动 | Incluido |
-| CDN | No | Sí |
-| Infraestructura | VM propia | Vercel |
-| Costo | Gratis (local) | Free/Paid en Vercel |
+## 4. Publicar proyectos
 
----
+1. MyCloud recibe el ZIP/GitHub en el backend persistente y extrae el código.
+2. El analizador ejecuta la instalación y validación local del build.
+3. MyCloud crea o reutiliza el Vercel Project correspondiente.
+4. Las variables de la aplicación se guardan en Vercel como variables cifradas.
+5. Vercel CLI publica a producción y espera el resultado real del build.
+6. MyCloud persiste la URL devuelta y la muestra en la ficha del proyecto.
 
-## Limitaciones
+Cada nombre de proyecto es estable para que los siguientes deployments actualicen la misma app. El límite real de runtimes y tamaño/build de Vercel sigue aplicando; no todos los proyectos arbitrarios son compatibles.
 
-1. **Límites de Vercel**:
-   - Build time: 60 min (Free), 2h (Pro)
-   - Bandwidth: 100 GB/mes (Free)
-   - Deployments: Ilimitados
+## Dominios personalizados
 
-2. **No puedes usar puertos personalizados**:
-   - Vercel usa puertos dinámicos
-   - No puedes exponer múltiples servicios en diferentes puertos
+Vercel asigna el dominio `vercel.app` del proyecto. Los dominios propios/subdominios requieren configuración y validación DNS en Vercel; MyCloud aún no los asocia automáticamente.
 
-3. **Variables de entorno**:
-   - Configúralas en la configuración del proyecto en Vercel
-   - O pasa `VERCEL_ENV_XXX` en MyCloud
+## Comprobación
 
----
-
-## Alternativa: MyCloud sin Vercel (Local)
-
-Si **no** quieres usar Vercel, solo deshabilita:
-
-```env
-VERCEL_ENABLED=false
-```
-
-MyCloud usará la arquitectura original (procesos locales en puertos 4000-5000).
-
----
-
-## Troubleshooting
-
-### Error: "Vercel API error: 401"
-
-- Verifica que tu token sea correcto
-- Verifica que el token tenga los permisos necesarios
-
-### Error: "No available ports"
-
-- Esto no aplica si usas Vercel
-- Vercel maneja los puertos automáticamente
-
-### Error: "Build failed"
-
-- Revisa los logs de Vercel en la consola
-- Asegúrate de que tu proyecto tenga un script `build` en `package.json`
-
----
-
-## Costos
-
-### Vercel Free Tier
-- ✅ 100 GB bandwidth/mes
-- ✅ 60 min build time
-- ✅ Ilimitados proyectos
-- ✅ SSL incluido
-
-**¿Es gratis para mi uso?**
-- ✅ Sí, si tu uso es modesto
-- ✅ Sí, para presentaciones y demos
-- ❌ No, si necesitas bandwidth elevado
-
----
-
-## Conclusión
-
-**MyCloud con Vercel es perfecto si:**
-- Quieres que tu plataforma sea accesible desde internet
-- No quieres configurar infraestructura
-- Quieres URL bonitas (`.vercel.app`)
-- Tu uso es modesto (menos de 100GB/mes)
-
-**MyCloud Local es perfecto si:**
-- Quieres más control sobre el entorno
-- No te importa configurar VM
-- Necesitas puertos personalizados
-- Quieres evitar límites de Vercel
-
----
-
-## ¿Qué prefieres?
-
-1. **Usar Vercel** (recomendado para presentación)
-   - Despliega MyCloud en Vercel
-   - Proyectos se despliegan en `vercel.app`
-   - Sin infraestructura
-
-2. **Usar local** (para pruebas)
-   - MyCloud en tu máquina
-   - Proyectos en puertos 4000-5000
-   - Sin internet necesario
-
-Dime y te ayudo a implementar la opción que elijas.
+- API: `https://api.tu-dominio.com/api/health`
+- Frontend: abre el dominio de producción de Vercel e inicia sesión con las credenciales configuradas en el backend.
+- Prueba primero un ZIP pequeño de Vite/React antes de usar proyectos con APIs o bases de datos propias.

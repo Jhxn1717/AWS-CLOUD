@@ -12,6 +12,9 @@ export class ProcessController {
   static async start(req: Request, res: Response): Promise<void> {
     const project = await ProjectModel.findById(req.params.id);
     if (!project) throw new NotFoundError('Project');
+    if (/^https:\/\//i.test(project.source_path ?? '')) {
+      throw new ValidationError('This project is hosted on Vercel. Redeploy it to publish changes.');
+    }
 
     if (project.status === ProjectStatus.RUNNING) {
       throw new ValidationError('Project is already running');
@@ -35,6 +38,9 @@ export class ProcessController {
   static async stop(req: Request, res: Response): Promise<void> {
     const project = await ProjectModel.findById(req.params.id);
     if (!project) throw new NotFoundError('Project');
+    if (/^https:\/\//i.test(project.source_path ?? '')) {
+      throw new ValidationError('This project is hosted on Vercel. Manage its runtime from Vercel.');
+    }
 
     if (project.status === ProjectStatus.STOPPED) {
       throw new ValidationError('Project is already stopped');
@@ -50,6 +56,9 @@ export class ProcessController {
   static async restart(req: Request, res: Response): Promise<void> {
     const project = await ProjectModel.findById(req.params.id);
     if (!project) throw new NotFoundError('Project');
+    if (/^https:\/\//i.test(project.source_path ?? '')) {
+      throw new ValidationError('This project is hosted on Vercel. Redeploy it to publish changes.');
+    }
 
     if (!project.source_path) {
       throw new ValidationError('No source code found. Deploy the project first.');
