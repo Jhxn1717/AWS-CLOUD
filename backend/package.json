@@ -25,7 +25,6 @@
     "pg": "^8.11.5",
     "unzipper": "^0.12.3",
     "uuid": "^9.0.1",
-    "vercel": "^63.1.2",
     "winston": "^3.13.0"
   },
   "devDependencies": {

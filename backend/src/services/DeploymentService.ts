@@ -23,6 +23,7 @@ import { spawn } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import fetch from 'node-fetch';
 
 import { ProjectAnalyzer }  from './ProjectAnalyzer';
@@ -40,7 +41,7 @@ import { EnvVarModel }      from '../models/EnvVarModel';
 
 import {
   DeploymentStatus, StageStatus, ProjectStatus,
-  ProjectType, LogLevel, AnalysisResult,
+  ProjectType, Framework, LogLevel, AnalysisResult,
 } from '../types';
 import { config } from '../config/env';
 import logger from '../utils/logger';
@@ -117,58 +118,48 @@ class VercelDeployer {
   }
 
   /**
-   * Deploys a source directory using Vercel's supported CLI and REST API.
+   * Uploads source files and waits for Vercel's production build to finish.
    */
-  async deployFromDirectory(projectName: string, projectPath: string, env: Record<string, string> = {}): Promise<string> {
+  async deployFromDirectory(
+    projectName: string,
+    projectPath: string,
+    env: Record<string, string> = {},
+    analysis: AnalysisResult,
+    onStatus?: (message: string) => Promise<void>,
+  ): Promise<string> {
     const safeName = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 100);
     if (!safeName) throw new Error('A valid Vercel project name could not be generated.');
 
     const project = await this.getOrCreateProject(safeName);
     const projectId = typeof project.id === 'string' ? project.id : '';
-    const orgId = this.teamId || (typeof project.accountId === 'string' ? project.accountId : '');
-    if (!projectId || !orgId) {
-      throw new Error('Vercel project metadata is incomplete; expected project and account IDs.');
-    }
-
-    const vercelDir = path.join(projectPath, '.vercel');
-    fs.mkdirSync(vercelDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(vercelDir, 'project.json'),
-      JSON.stringify({ orgId, projectId }),
-      'utf8',
-    );
+    if (!projectId) throw new Error('Vercel did not return a project ID.');
 
     await this.upsertEnvironment(projectId, env);
+    const files = await this.collectSourceFiles(projectPath, Boolean(analysis.buildCommand));
+    if (files.length === 0) throw new Error('No deployable source files were found.');
+    if (files.length > 15000) throw new Error('Vercel deployment exceeds the 15,000-file limit.');
 
-    const cliPath = path.resolve(__dirname, '../../scripts/vercel-cli.mjs');
-    if (!fs.existsSync(cliPath)) {
-      throw new Error('Vercel CLI launcher is missing from backend/scripts.');
-    }
-
-    let output: string;
-    try {
-      output = await runCommand(
-        process.execPath,
-        [cliPath, 'deploy', '--yes', '--prod', '--no-color'],
-        projectPath,
-        {
-          VERCEL_TOKEN: this.token,
-          ...(this.teamId ? { VERCEL_ORG_ID: this.teamId } : {}),
-        },
-        line => logger.info(`[Vercel] ${line}`),
+    await onStatus?.(`[VERCEL] Uploading ${files.length} source files`);
+    const uploadedFiles: Array<{ file: string; sha: string; size: number }> = [];
+    for (let offset = 0; offset < files.length; offset += 4) {
+      const uploaded = await Promise.all(
+        files.slice(offset, offset + 4).map(file => this.uploadFile(file)),
       );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(message.split(this.token).join('[redacted]'));
-    }
-    const urls = output.match(/https:\/\/[a-z0-9][a-z0-9.-]*\.vercel\.app\b/gi);
-    const deploymentUrl = urls?.[urls.length - 1];
-    if (!deploymentUrl) {
-      throw new Error('Vercel CLI finished without returning a deployment URL.');
+      uploadedFiles.push(...uploaded);
     }
 
-    logger.info('[Vercel] Production deployment ready', { projectName: safeName, deploymentUrl });
-    return deploymentUrl;
+    const deployment = await this.request('/v13/deployments', 'POST', {
+      name: safeName,
+      project: projectId,
+      files: uploadedFiles,
+      projectSettings: this.getProjectSettings(analysis, projectPath),
+      target: 'production',
+      meta: { mycloudProject: projectName },
+    });
+    const deploymentId = typeof deployment?.id === 'string' ? deployment.id : '';
+    if (!deploymentId) throw new Error('Vercel did not return a deployment ID.');
+
+    return this.waitForReady(deploymentId, deployment, safeName, onStatus);
   }
 
   private async request(pathname: string, method: string, body?: unknown, allowNotFound = false): Promise<Record<string, unknown> | null> {
@@ -236,6 +227,139 @@ class VercelDeployer {
       });
       throw new Error(`Vercel rejected environment variables: ${keys.join(', ')}`);
     }
+  }
+
+  private async collectSourceFiles(
+    projectPath: string,
+    hasRemoteBuild: boolean,
+  ): Promise<Array<{ file: string; absolutePath: string; size: number; sha: string }>> {
+    const ignoredDirectories = new Set(['.git', '.vercel', 'node_modules', '.next', '.turbo', '.cache', 'coverage']);
+    const ignoredOutputs = new Set(['dist', 'build', 'out']);
+    const files: Array<{ file: string; absolutePath: string; size: number; sha: string }> = [];
+
+    const visit = async (directory: string): Promise<void> => {
+      const entries = fs.readdirSync(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        const absolutePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          if (ignoredDirectories.has(entry.name) || (hasRemoteBuild && ignoredOutputs.has(entry.name))) continue;
+          await visit(absolutePath);
+          continue;
+        }
+        if (!entry.isFile() || /(^|\/)\.env(?:$|\.)/i.test(entry.name) || /\.log$/i.test(entry.name)) continue;
+
+        const relative = path.relative(projectPath, absolutePath).split(path.sep).join('/');
+        const stat = fs.statSync(absolutePath);
+        const sha = await this.sha1File(absolutePath);
+        files.push({ file: relative, absolutePath, size: stat.size, sha });
+      }
+    };
+
+    await visit(projectPath);
+    return files;
+  }
+
+  private async sha1File(filePath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const hash = crypto.createHash('sha1');
+      const stream = fs.createReadStream(filePath);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.on('error', reject);
+      stream.on('end', () => resolve(hash.digest('hex')));
+    });
+  }
+
+  private async uploadFile(file: { file: string; absolutePath: string; size: number; sha: string }): Promise<{ file: string; sha: string; size: number }> {
+    const url = new URL('/v2/files', 'https://api.vercel.com');
+    if (this.teamId) url.searchParams.set('teamId', this.teamId);
+    const response = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(file.size),
+        'x-vercel-digest': file.sha,
+      },
+      body: fs.createReadStream(file.absolutePath),
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+      const error = payload.error as Record<string, unknown> | undefined;
+      const message = typeof error?.message === 'string' ? error.message : response.statusText;
+      throw new Error(`Vercel file upload failed (${response.status}) for ${file.file}: ${message}`);
+    }
+    return { file: file.file, sha: file.sha, size: file.size };
+  }
+
+  private getProjectSettings(analysis: AnalysisResult, projectPath: string): Record<string, string | null> {
+    const rootFiles = fs.readdirSync(projectPath);
+    const hasViteConfig = rootFiles.some(file => /^vite\.config\./.test(file));
+    let framework: string | null = null;
+    let outputDirectory: string | null = null;
+
+    switch (analysis.framework) {
+      case Framework.NEXTJS: framework = 'nextjs'; break;
+      case Framework.VITE: framework = 'vite'; break;
+      case Framework.REACT:
+        framework = hasViteConfig ? 'vite' : 'create-react-app';
+        outputDirectory = hasViteConfig ? 'dist' : 'build';
+        break;
+      case Framework.VUE:
+        framework = hasViteConfig ? 'vite' : 'vue';
+        outputDirectory = 'dist';
+        break;
+      case Framework.ANGULAR:
+        framework = 'angular';
+        outputDirectory = 'dist';
+        break;
+      case Framework.EXPRESS: framework = 'express'; break;
+      case Framework.FASTAPI: framework = 'fastapi'; break;
+      case Framework.FLASK: framework = 'flask'; break;
+      case Framework.DJANGO: framework = 'django'; break;
+      default: break;
+    }
+
+    return {
+      framework,
+      buildCommand: analysis.buildCommand,
+      installCommand: null,
+      outputDirectory,
+    };
+  }
+
+  private async waitForReady(
+    deploymentId: string,
+    initial: Record<string, unknown> | null,
+    projectName: string,
+    onStatus?: (message: string) => Promise<void>,
+  ): Promise<string> {
+    const deadline = Date.now() + 15 * 60 * 1000;
+    let deployment = initial;
+    let previousState = '';
+
+    while (Date.now() < deadline) {
+      const state = typeof deployment?.readyState === 'string' ? deployment.readyState : 'QUEUED';
+      if (state !== previousState) {
+        previousState = state;
+        await onStatus?.(`[VERCEL] ${projectName}: ${state}`);
+      }
+      if (state === 'READY') {
+        const url = typeof deployment?.url === 'string' ? deployment.url : '';
+        if (!url) throw new Error('Vercel reported READY without a deployment URL.');
+        return url.startsWith('http') ? url : `https://${url}`;
+      }
+      if (state === 'ERROR' || state === 'CANCELED' || state === 'BLOCKED') {
+        const detail = typeof deployment?.errorMessage === 'string' ? deployment.errorMessage : state;
+        throw new Error(`Vercel deployment ${state}: ${detail}`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      deployment = await this.request(`/v13/deployments/${encodeURIComponent(deploymentId)}`, 'GET');
+    }
+
+    throw new Error(`Vercel deployment did not become ready within 15 minutes: ${projectName}`);
   }
 
   async deleteProject(projectName: string): Promise<void> {
@@ -354,6 +478,7 @@ export class DeploymentService {
   ): Promise<void> {
     let allocatedPort: number | null = null;
     let vercelUrl: string | null = null;
+    const deployToVercel = config.VERCEL_ENABLED === 'true' && !!config.VERCEL_TOKEN;
 
     // Helper: log + stage tracking
     const log = async (msg: string, level = LogLevel.INFO, stage?: string) =>
@@ -369,6 +494,13 @@ export class DeploymentService {
     const finishStage = async (stage: string, logs?: string) => {
       await DeploymentModel.finishStage(depId, stage, StageStatus.SUCCESS, logs);
       await log(`Stage complete: ${stage}`, LogLevel.INFO, stage);
+    };
+
+    const skipStage = async (stage: string, reason: string) => {
+      await DeploymentModel.createStage(depId, stage);
+      await DeploymentModel.updateStatus(depId, stage as DeploymentStatus, stage);
+      await DeploymentModel.finishStage(depId, stage, StageStatus.SKIPPED);
+      await log(reason, LogLevel.INFO, stage);
     };
 
     const failStage = async (stage: string, error: string) => {
@@ -436,19 +568,32 @@ export class DeploymentService {
       }
 
       // ── 4. DEPENDENCY_INSTALL ────────────────────────────────
-      await startStage(DeploymentStatus.DEPENDENCY_INSTALL);
       await ProjectModel.updateStatus(projectId, ProjectStatus.BUILDING);
-      try {
-        await DeploymentService._installDependencies(analysis, projectPath, depId, projectId);
-        await finishStage(DeploymentStatus.DEPENDENCY_INSTALL);
-      } catch (err: unknown) {
-        await failStage(DeploymentStatus.DEPENDENCY_INSTALL, (err as Error).message);
-        return;
+      if (deployToVercel) {
+        await skipStage(DeploymentStatus.DEPENDENCY_INSTALL, '[INSTALL] Vercel instalará las dependencias durante el build remoto.');
+      } else {
+        await startStage(DeploymentStatus.DEPENDENCY_INSTALL);
+        try {
+          await DeploymentService._installDependencies(analysis, projectPath, depId, projectId);
+          await finishStage(DeploymentStatus.DEPENDENCY_INSTALL);
+        } catch (err: unknown) {
+          await failStage(DeploymentStatus.DEPENDENCY_INSTALL, (err as Error).message);
+          return;
+        }
       }
 
       // ── 5. DATABASE_PROVISIONING ─────────────────────────────
       let dbEnvVars: Record<string, string> = {};
-      if (analysis.needsDatabase && analysis.databaseType !== 'none') {
+      if (deployToVercel) {
+        await skipStage(
+          DeploymentStatus.DATABASE_PROVISIONING,
+          '[DB] No se aprovisiona una base local para Vercel; se enviarán las variables guardadas en el proyecto.',
+        );
+        const configuredEnv = await EnvVarModel.toRecord(projectId);
+        if (analysis.needsDatabase && !configuredEnv.DATABASE_URL && !configuredEnv.DB_HOST) {
+          await log('[DB] Configura la conexión externa del proyecto antes de usar la app desplegada.', LogLevel.WARN, DeploymentStatus.DATABASE_PROVISIONING);
+        }
+      } else if (analysis.needsDatabase && analysis.databaseType !== 'none') {
         await startStage(DeploymentStatus.DATABASE_PROVISIONING);
         try {
           dbEnvVars = await DatabaseManager.provision(projectId, analysis.databaseType, projectPath);
@@ -460,14 +605,13 @@ export class DeploymentService {
           return;
         }
       } else {
-        // Skip stage
-        await DeploymentModel.createStage(depId, DeploymentStatus.DATABASE_PROVISIONING);
-        await DeploymentModel.finishStage(depId, DeploymentStatus.DATABASE_PROVISIONING, StageStatus.SKIPPED);
-        await log('[DB] No database required — skipping', LogLevel.INFO, DeploymentStatus.DATABASE_PROVISIONING);
+        await skipStage(DeploymentStatus.DATABASE_PROVISIONING, '[DB] No database required — skipping');
       }
 
       // ── 6. BUILD ─────────────────────────────────────────────
-      if (analysis.buildCommand) {
+      if (deployToVercel) {
+        await skipStage(DeploymentStatus.BUILD, '[BUILD] Vercel ejecutará el build remoto.');
+      } else if (analysis.buildCommand) {
         await startStage(DeploymentStatus.BUILD);
         try {
           await DeploymentService._runBuild(analysis, projectPath, depId, projectId);
@@ -489,13 +633,11 @@ export class DeploymentService {
           return;
         }
       } else {
-        await DeploymentModel.createStage(depId, DeploymentStatus.BUILD);
-        await DeploymentModel.finishStage(depId, DeploymentStatus.BUILD, StageStatus.SKIPPED);
-        await log('[BUILD] No build step required — skipping', LogLevel.INFO, DeploymentStatus.BUILD);
+        await skipStage(DeploymentStatus.BUILD, '[BUILD] No build step required — skipping');
       }
 
       // ── MODIFICACIÓN PARA Vercel: Deploy a Vercel en lugar de usar puertos ─────
-      if (config.VERCEL_ENABLED === 'true' && config.VERCEL_TOKEN) {
+      if (deployToVercel) {
         await startStage(DeploymentStatus.PROCESS_START);
         try {
           const vercel = new VercelDeployer(config.VERCEL_TOKEN, config.VERCEL_TEAM_ID);
@@ -503,7 +645,9 @@ export class DeploymentService {
           vercelUrl = await vercel.deployFromDirectory(
             `project-${projectId}`,
             projectPath,
-            { ...storedEnvVars, ...dbEnvVars, NODE_ENV: 'production' }
+            { ...storedEnvVars, ...dbEnvVars, NODE_ENV: 'production' },
+            analysis,
+            message => log(message, LogLevel.INFO, DeploymentStatus.PROCESS_START),
           );
           await log(`[VERCEL] Deployed to: ${vercelUrl}`, LogLevel.INFO, DeploymentStatus.PROCESS_START);
           await finishStage(DeploymentStatus.PROCESS_START, vercelUrl);

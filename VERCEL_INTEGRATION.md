@@ -3,7 +3,7 @@
 ## Arquitectura funcional
 
 - **Consola React**: desplegada en Vercel desde `frontend/`.
-- **API y worker MyCloud**: servicio Node persistente. Procesa ZIP, instala dependencias, valida builds y ejecuta Vercel CLI. No desplegar este worker como función serverless.
+- **API y worker MyCloud**: servicio Node persistente. Procesa ZIP y sube los archivos fuente a Vercel mediante su API REST. No desplegar este worker como función serverless.
 - **Base de datos MyCloud**: PostgreSQL administrado en Neon o Supabase usando `DATABASE_URL` y TLS.
 - **Aplicaciones de usuarios**: un Vercel Project por proyecto MyCloud; cada deployment de producción devuelve su URL `*.vercel.app`.
 
@@ -30,7 +30,7 @@ Configura `ADMIN_EMAIL` y `ADMIN_PASSWORD` antes del seed.
 
 ## 2. Backend y worker persistentes
 
-El host del backend debe usar Node.js 20 o superior, conservar disco para temporales y proyectos extraídos, y mantener el proceso encendido. Configura en sus variables privadas:
+El host del backend debe usar Node.js 20 o superior, conservar espacio temporal para extraer ZIP y mantener el proceso encendido durante el pipeline. Configura en sus variables privadas:
 
 ```dotenv
 NODE_ENV=production
@@ -64,10 +64,10 @@ El origen del frontend debe coincidir con una entrada exacta de `CORS_ORIGINS` e
 ## 4. Publicar proyectos
 
 1. MyCloud recibe el ZIP/GitHub en el backend persistente y extrae el código.
-2. El analizador ejecuta la instalación y validación local del build.
+2. El analizador detecta la raíz y el framework del proyecto sin instalar dependencias localmente.
 3. MyCloud crea o reutiliza el Vercel Project correspondiente.
 4. Las variables de la aplicación se guardan en Vercel como variables cifradas.
-5. Vercel CLI publica a producción y espera el resultado real del build.
+5. MyCloud crea el deployment con `POST /v13/deployments` y consulta su estado hasta `READY` o `ERROR`; Vercel ejecuta instalación y build remotamente.
 6. MyCloud persiste la URL devuelta y la muestra en la ficha del proyecto.
 
 Cada nombre de proyecto es estable para que los siguientes deployments actualicen la misma app. El límite real de runtimes y tamaño/build de Vercel sigue aplicando; no todos los proyectos arbitrarios son compatibles.

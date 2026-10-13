@@ -34,7 +34,7 @@ MyCloud es una plataforma PaaS (Platform as a Service) privada de grado de produ
 ## 2. Requisitos Previos
 
 - **Sistema Operativo**: Windows 10/11 o Linux / macOS.
-- **Node.js**: v20.0.0 o superior (v22 recomendada y requerida por Vercel CLI).
+- **Node.js**: v20.0.0 o superior (v22 recomendada para producción).
 - **npm**: v9.0.0 o superior.
 - **PostgreSQL**: PostgreSQL 14+ local para desarrollo o una base administrada compatible con `pg` (Neon/Supabase) para producción.
 - **Python**: 3.10+ (opcional, para despliegue de aplicaciones Python).
