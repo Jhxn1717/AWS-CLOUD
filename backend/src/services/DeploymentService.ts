@@ -33,6 +33,8 @@ import { ProcessManager }   from './ProcessManager';
 import { DatabaseManager }  from './DatabaseManager';
 import { HealthCheckService } from './HealthCheckService';
 import { StaticServer }     from './StaticServer';
+import { NodeRuntimeManager } from './NodeRuntimeManager';
+import { RuntimePreflight } from './RuntimePreflight';
 import { LogService }       from './LogService';
 
 import { ProjectModel }     from '../models/ProjectModel';
@@ -45,6 +47,7 @@ import {
 } from '../types';
 import { config } from '../config/env';
 import logger from '../utils/logger';
+import { projectEnvironment } from '../utils/projectEnvironment';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -59,14 +62,27 @@ function runCommand(
   env?: Record<string, string>,
   onLine?: (line: string) => void,
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
+  return (async () => {
+    if (['node', 'npm', 'npx', 'yarn'].includes(command)) {
+      const prefixIndex = args.indexOf('--prefix');
+      const runtimeDirectory = prefixIndex >= 0 && args[prefixIndex + 1] ? path.resolve(cwd, args[prefixIndex + 1]) : cwd;
+      const runtime = await NodeRuntimeManager.resolve(runtimeDirectory, async message => { onLine?.(message); });
+      env = { ...env, ...runtime.env };
+      if (command === 'node') command = runtime.nodePath;
+      else if (command === 'npm' || command === 'npx') {
+        const cli = path.join(path.dirname(runtime.nodePath), 'node_modules/npm/bin', command === 'npm' ? 'npm-cli.js' : 'npx-cli.js');
+        args = [cli, ...args];
+        command = runtime.nodePath;
+      }
+    }
+    return new Promise<string>((resolve, reject) => {
     const isWindows = process.platform === 'win32';
     const useShell  = isWindows && (command === 'npm' || command === 'pip' ||
                                     command === 'mvn' || command === 'composer');
 
     const child = spawn(command, args, {
       cwd,
-      env:   { ...process.env as Record<string, string>, ...(env ?? {}) },
+      env: projectEnvironment(env),
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: useShell,
       windowsHide: true,
@@ -103,7 +119,8 @@ function runCommand(
         ));
       }
     });
-  });
+    });
+  })();
 }
 
 // ─── Vercel Deployer Helper ──────────────────────────────────────────────────
@@ -527,6 +544,15 @@ export class DeploymentService {
       await startStage(DeploymentStatus.EXTRACTION);
       let projectPath: string;
       try {
+        await log('[EXTRACTION] Deteniendo la version anterior antes de reemplazar sus archivos.', LogLevel.INFO, DeploymentStatus.EXTRACTION);
+        await ProcessManager.stop(projectId, true);
+        StaticServer.stop(projectId);
+        await ProjectModel.updateStatus(projectId, ProjectStatus.ANALYZING);
+        const previous = await ProjectModel.findById(projectId);
+        if (previous?.assigned_port) {
+          await PortManager.releasePort(previous.assigned_port, projectId);
+          await ProjectModel.update(projectId, { assignedPort: null, processPid: null });
+        }
         projectPath = await StorageManager.extractZip(projectId, zipPath);
         await log(`[EXTRACTION] Extracted to: ${projectPath}`, LogLevel.INFO, DeploymentStatus.EXTRACTION);
         await finishStage(DeploymentStatus.EXTRACTION, projectPath);
@@ -547,6 +573,9 @@ export class DeploymentService {
           projectPath = analysis.projectRoot;
           await ProjectModel.update(projectId, { sourcePath: projectPath });
           logger.info(`[DeploymentService] Analyzer selected project root: ${projectPath}`);
+        }
+        if (!deployToVercel) {
+          await RuntimePreflight.check(analysis, projectPath, message => log(message, LogLevel.INFO, DeploymentStatus.ANALYSIS));
         }
         await log(`[ANALYZER] Runtime: ${analysis.runtime}`, LogLevel.INFO, DeploymentStatus.ANALYSIS);
         await log(`[ANALYZER] Framework: ${analysis.framework}`, LogLevel.INFO, DeploymentStatus.ANALYSIS);
@@ -571,6 +600,8 @@ export class DeploymentService {
       await ProjectModel.updateStatus(projectId, ProjectStatus.BUILDING);
       if (deployToVercel) {
         await skipStage(DeploymentStatus.DEPENDENCY_INSTALL, '[INSTALL] Vercel instalará las dependencias durante el build remoto.');
+      } else if (analysis.projectType === ProjectType.STATIC_FRONTEND && !fs.existsSync(path.join(projectPath, 'package.json')) && !analysis.buildCommand) {
+        await skipStage(DeploymentStatus.DEPENDENCY_INSTALL, '[INSTALL] Sitio HTML estático sin dependencias — no requiere instalación.');
       } else {
         await startStage(DeploymentStatus.DEPENDENCY_INSTALL);
         try {
@@ -690,6 +721,7 @@ export class DeploymentService {
 
       // Build env vars for the process
       const processEnv: Record<string, string> = {
+        ...await EnvVarModel.toRecord(projectId),
         PORT:     String(allocatedPort),
         NODE_ENV: 'production',
         ...dbEnvVars,
@@ -717,10 +749,14 @@ export class DeploymentService {
 
       // ── 9. HEALTH_CHECK ──────────────────────────────────────
       await startStage(DeploymentStatus.HEALTH_CHECK);
-      const health = await HealthCheckService.waitForHealthy(allocatedPort!);
+      const health = await HealthCheckService.waitForHealthy(allocatedPort!, undefined, undefined, () => {
+        if (StaticServer.isRunning(projectId) || ProcessManager.isRunning(projectId)) return null;
+        const output = ProcessManager.getRecentLogs(projectId, 12).join('\n');
+        return `El proceso terminó antes de responder al health check.\n${output || 'Revisa los registros de ejecución.'}`;
+      });
 
       if (!health.healthy) {
-        const errMsg = `Health check failed after ${config.HEALTH_CHECK_RETRIES} retries. ` +
+        const errMsg = health.error?.startsWith('El proceso terminó') ? health.error : `Health check failed after ${config.HEALTH_CHECK_RETRIES} retries. ` +
                        `Last error: ${health.error ?? `HTTP ${health.statusCode}`}`;
         await failStage(DeploymentStatus.HEALTH_CHECK, errMsg);
         // Stop the process and release port
@@ -784,7 +820,7 @@ export class DeploymentService {
 
         const cmd  = lockFile === 'yarn.lock' ? 'yarn' : 'npm';
         const args = lockFile === 'yarn.lock' ? ['install', '--frozen-lockfile'] :
-                                                ['ci', '--prefer-offline'];
+                                                [lockFile ? 'ci' : 'install', '--prefer-offline', '--include=dev', '--include=optional'];
 
         await log(`[INSTALL] Running: ${cmd} ${args.join(' ')}`);
         try {
@@ -792,14 +828,14 @@ export class DeploymentService {
         } catch {
           // npm ci can fail if no package-lock — fall back to npm install
           await log('[INSTALL] npm ci failed, falling back to npm install');
-          await runCommand('npm', ['install'], projectPath, undefined, line => log(`[npm] ${line}`));
+          await runCommand('npm', ['install', '--include=dev', '--include=optional'], projectPath, undefined, line => log(`[npm] ${line}`));
         }
 
         // Also install frontend/ subdirectory if it exists (fullstack projects)
         const frontendDir = path.join(projectPath, 'frontend');
         if (fs.existsSync(path.join(frontendDir, 'package.json'))) {
           await log('[INSTALL] Installing frontend/ dependencies');
-          await runCommand('npm', ['install'], frontendDir, undefined, line => log(`[npm/frontend] ${line}`));
+          await runCommand('npm', ['install', '--include=dev', '--include=optional'], frontendDir, undefined, line => log(`[npm/frontend] ${line}`));
         }
         break;
       }
@@ -818,7 +854,10 @@ export class DeploymentService {
           await log('[INSTALL] Running: python -m pip install -r backend/requirements.txt');
           await runCommand(pythonCmd, ['-m', 'pip', 'install', '-r', 'backend/requirements.txt'], projectPath, undefined, line => log(`[pip] ${line}`));
         }
-        if (!rootReqs && !backendReqs) {
+        if (!rootReqs && !backendReqs && fs.existsSync(path.join(projectPath, 'pyproject.toml'))) {
+          await log('[INSTALL] Installing Python project from pyproject.toml');
+          await runCommand(pythonCmd, ['-m', 'pip', 'install', '.'], projectPath, undefined, line => log(`[pip] ${line}`));
+        } else if (!rootReqs && !backendReqs) {
           await log('[INSTALL] No requirements.txt found — skipping pip install');
         }
 
@@ -826,7 +865,7 @@ export class DeploymentService {
         const frontendDir = path.join(projectPath, 'frontend');
         if (fs.existsSync(path.join(frontendDir, 'package.json'))) {
           await log('[INSTALL] Installing frontend/ dependencies');
-          await runCommand('npm', ['install'], frontendDir, undefined, line => log(`[npm/frontend] ${line}`));
+          await runCommand('npm', ['install', '--include=dev', '--include=optional'], frontendDir, undefined, line => log(`[npm/frontend] ${line}`));
         }
         break;
       }
@@ -901,12 +940,24 @@ export class DeploymentService {
 
     // Dynamic process: resolve {{PORT}} in args
     const resolvedArgs = ProjectAnalyzer.resolvePort(analysis.startArgs, port);
+    let command = analysis.startCommand;
+    let args = resolvedArgs;
+    if (analysis.runtime === 'nodejs') {
+      const runtime = await NodeRuntimeManager.resolve(projectPath);
+      envVars = { ...envVars, ...runtime.env };
+      if (command === 'node') command = runtime.nodePath;
+      else if (command === 'npm' || command === 'npx') {
+        const cli = path.join(path.dirname(runtime.nodePath), 'node_modules/npm/bin', command === 'npm' ? 'npm-cli.js' : 'npx-cli.js');
+        args = [cli, ...args];
+        command = runtime.nodePath;
+      }
+    }
 
     return ProcessManager.start({
       projectId,
-      command:    analysis.startCommand,
-      args:       resolvedArgs,
-      workingDir: projectPath,
+      command,
+      args,
+      workingDir: analysis.startWorkingDir ?? projectPath,
       port,
       envVars,
     });
@@ -937,7 +988,12 @@ export class DeploymentService {
     await ProjectModel.updateStatus(projectId, ProjectStatus.STARTING);
 
     // Re-analyze to get start command
-    const analysis = await ProjectAnalyzer.analyze(project.source_path);
+    let analysis = await ProjectAnalyzer.analyze(project.source_path);
+    // Restart the previously deployed artifact, not an optional backend found
+    // elsewhere in the source tree of a site deployed as a static frontend.
+    if (project.project_type === ProjectType.STATIC_FRONTEND && fs.existsSync(path.join(StorageManager.getDistPath(projectId, project.source_path), 'index.html'))) {
+      analysis = { ...analysis, projectType: ProjectType.STATIC_FRONTEND, startCommand: '__STATIC_SERVER__', startArgs: [], startWorkingDir: undefined, buildCommand: null };
+    }
     const envVars = await EnvVarModel.toRecord(projectId);
 
     try {

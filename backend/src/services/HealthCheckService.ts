@@ -49,6 +49,7 @@ export class HealthCheckService {
     port: number,
     retries  = config.HEALTH_CHECK_RETRIES,
     intervalMs = config.HEALTH_CHECK_INTERVAL_MS,
+    processError?: () => string | null,
   ): Promise<HealthCheckResult> {
     const url = `http://127.0.0.1:${port}`;
 
@@ -61,6 +62,8 @@ export class HealthCheckService {
     for (let attempt = 1; attempt <= retries; attempt++) {
       // Wait before checking (give the process time to start)
       await new Promise(r => setTimeout(r, intervalMs));
+      const failure = processError?.();
+      if (failure) return { healthy: false, statusCode: null, latencyMs: null, error: failure, checkedAt: new Date() };
 
       const result = await HealthCheckService.check(port);
 

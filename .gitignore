@@ -47,3 +47,8 @@ desktop.ini
 # Coverage
 coverage/
 .nyc_output/
+
+# Local PostgreSQL binaries and database
+.local/
+frontend/public/project-tunnels.json
+frontend/public/project-tunnels.json.tmp

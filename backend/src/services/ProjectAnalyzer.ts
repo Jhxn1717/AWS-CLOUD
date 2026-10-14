@@ -316,8 +316,31 @@ export class ProjectAnalyzer {
       }
     }
 
+    // Plain HTML sites have no dependency manifest. Search only after checking
+    // runtime descriptors so an application's HTML template is not deployed alone.
+    const staticQueue = [projectPath];
+    const ignoredStaticDirs = new Set(['node_modules', '.git', '.venv', '__MACOSX', 'coverage']);
+    while (staticQueue.length > 0) {
+      const current = staticQueue.shift()!;
+      if (fileExists(current, 'index.html')) {
+        return ProjectAnalyzer._buildResult({
+          runtime: Runtime.NODEJS, framework: Framework.PLAIN,
+          projectType: ProjectType.STATIC_FRONTEND,
+          buildCommand: null, startCommand: '__STATIC_SERVER__', startArgs: [],
+          needsDatabase: false, databaseType: DatabaseType.NONE,
+          detectedFiles: ['index.html'], warnings,
+          projectRoot: current,
+        });
+      }
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        if (entry.isDirectory() && !ignoredStaticDirs.has(entry.name)) {
+          staticQueue.push(path.join(current, entry.name));
+        }
+      }
+    }
+
     throw new Error(
-      'Unable to detect project runtime. Expected one of: package.json, requirements.txt, pom.xml, build.gradle, composer.json',
+      'Unable to detect project runtime. Expected index.html for a static site, or package.json, requirements.txt, pyproject.toml, pom.xml, build.gradle, composer.json.',
     );
   }
 
@@ -592,6 +615,7 @@ export class ProjectAnalyzer {
     let startArgs:    string[];
 
     const isFastAPI = text.includes('fastapi');
+    let startWorkingDir: string | undefined;
     const isFlask   = text.includes('flask');
     const isDjango  = hasDjango || text.includes('django');
 
@@ -623,16 +647,9 @@ export class ProjectAnalyzer {
         mainFile = 'main:app';
       }
 
-      // For fullstack projects, use python -m uvicorn with proper working directory
-      // The workingDir will be handled by ProcessManager
-      if (workingDir) {
-        // Store working dir hint in startArgs (hacky but works)
-        startCommand = 'python';
-        startArgs    = ['-m', 'uvicorn', mainFile, '--host', '0.0.0.0', '--port', '{{PORT}}', '--working-dir-hint', workingDir];
-      } else {
-        startCommand = 'uvicorn';
-        startArgs    = [mainFile, '--host', '0.0.0.0', '--port', '{{PORT}}'];
-      }
+      startCommand = process.platform === 'win32' ? 'python.exe' : 'python';
+      startArgs = ['-m', 'uvicorn', mainFile, '--host', '0.0.0.0', '--port', '{{PORT}}'];
+      startWorkingDir = workingDir ?? undefined;
     } else if (isDjango) {
       framework    = Framework.DJANGO;
       startCommand = 'python';
@@ -659,7 +676,7 @@ export class ProjectAnalyzer {
     return ProjectAnalyzer._buildResult({
       runtime: Runtime.PYTHON, framework,
       projectType: ProjectType.BACKEND,
-      buildCommand: null, startCommand, startArgs,
+      buildCommand: null, startCommand, startArgs, startWorkingDir,
       needsDatabase: needsDb, databaseType: needsDb ? dbType : DatabaseType.NONE,
       detectedFiles, warnings,
       projectRoot: explicitProjectRoot ?? projectPath,
@@ -766,6 +783,7 @@ export class ProjectAnalyzer {
     detectedFiles: string[];
     warnings:      string[];
     projectRoot?:  string;
+    startWorkingDir?: string;
   }): AnalysisResult {
     logger.info(
       `[Analyzer] Result: runtime=${params.runtime} framework=${params.framework} type=${params.projectType}`,
@@ -789,6 +807,7 @@ export class ProjectAnalyzer {
       hasJava:        params.detectedFiles.some(f => f === 'pom.xml' || f === 'build.gradle'),
       hasPhp:         params.detectedFiles.includes('composer.json'),
       projectRoot:    params.projectRoot,
+      startWorkingDir: params.startWorkingDir,
       detectedFiles:  params.detectedFiles,
       warnings:       params.warnings,
     };
@@ -833,17 +852,20 @@ export class ProjectAnalyzer {
 
     // Determine backend entry point
     let backendStart: { command: string; args: string[] };
+    let startWorkingDir: string | undefined;
 
     if (isFastAPI) {
       // Look for main app file inside backend/ or api/
       const appModule =
-        fs.existsSync(path.join(backendPath, 'main.py')) ? 'backend.main:app' :
-        fs.existsSync(path.join(backendPath, 'app', 'main.py')) ? 'backend.app.main:app' :
-        fs.existsSync(path.join(apiPath, 'index.py')) ? 'api.index:app' :
-        fs.existsSync(path.join(apiPath, 'main.py')) ? 'api.main:app' :
+        fs.existsSync(path.join(backendPath, 'main.py')) ? 'main:app' :
+        fs.existsSync(path.join(backendPath, 'app', 'main.py')) ? 'app.main:app' :
+        fs.existsSync(path.join(apiPath, 'index.py')) ? 'index:app' :
+        fs.existsSync(path.join(apiPath, 'main.py')) ? 'main:app' :
         fs.existsSync(path.join(projectPath, 'main.py')) ? 'main:app' :
         'main:app';
-      backendStart = { command: 'uvicorn', args: [appModule, '--host', '0.0.0.0', '--port', '{{PORT}}'] };
+      startWorkingDir = fs.existsSync(path.join(backendPath, 'main.py')) || fs.existsSync(path.join(backendPath, 'app', 'main.py'))
+        ? backendPath : fs.existsSync(path.join(apiPath, 'index.py')) || fs.existsSync(path.join(apiPath, 'main.py')) ? apiPath : projectPath;
+      backendStart = { command: process.platform === 'win32' ? 'python.exe' : 'python', args: ['-m', 'uvicorn', appModule, '--host', '0.0.0.0', '--port', '{{PORT}}'] };
       detectedFiles.push('requirements.txt (FastAPI)');
     } else if (isDjango) {
       backendStart = { command: 'python', args: ['backend/manage.py', 'runserver', '0.0.0.0:{{PORT}}'] };
@@ -878,6 +900,7 @@ export class ProjectAnalyzer {
       buildCommand,
       startCommand: backendStart.command,
       startArgs:    backendStart.args,
+      startWorkingDir,
       needsDatabase: needsDb,
       databaseType:  needsDb ? dbType : DatabaseType.NONE,
       detectedFiles, warnings,

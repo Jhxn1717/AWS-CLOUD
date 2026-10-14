@@ -228,6 +228,7 @@ export interface ProjectFileRow {
 // ─────────────────────────────────────────────────────────────
 
 export interface AnalysisResult {
+  startWorkingDir?: string;
   runtime:        Runtime;
   runtimeVersion: string | null;
   framework:      Framework;

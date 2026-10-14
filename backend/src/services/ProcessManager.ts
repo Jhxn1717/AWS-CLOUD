@@ -5,7 +5,7 @@
  * Keeps an in-memory registry of running processes keyed by projectId.
  */
 
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execFile } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { EventEmitter } from 'events';
@@ -14,6 +14,7 @@ import { ProjectModel } from '../models/ProjectModel';
 import { ProcessStatus, ProjectStatus } from '../types';
 import { config } from '../config/env';
 import logger from '../utils/logger';
+import { projectEnvironment } from '../utils/projectEnvironment';
 
 interface RunningProcess {
   child:      ChildProcess;
@@ -28,6 +29,7 @@ interface RunningProcess {
 
 // In-memory registry: projectId → RunningProcess
 const registry = new Map<string, RunningProcess>();
+const exitedLogs = new Map<string, string[]>();
 
 // Event emitter for real-time log streaming
 export const processEvents = new EventEmitter();
@@ -46,14 +48,14 @@ export class ProcessManager {
     envVars:    Record<string, string>;
   }): Promise<number> {
     const { projectId, command, args, workingDir, port, envVars } = options;
+    exitedLogs.delete(projectId);
 
     // Kill any existing process for this project first
     await ProcessManager.stop(projectId, true);
 
     // Build the full environment: inherit parent + project vars
     const fullEnv: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      ...envVars,
+      ...projectEnvironment(envVars),
       PORT: String(port),
     };
 
@@ -144,6 +146,8 @@ export class ProcessManager {
     child.on('exit', async (code, signal) => {
       logStream.end();
       registry.delete(projectId);
+      exitedLogs.set(projectId, entry.logBuffer.slice(-50));
+      if (exitedLogs.size > 100) exitedLogs.delete(exitedLogs.keys().next().value!);
 
       logger.warn(`[ProcessManager] Process exited PID=${child.pid} code=${code} signal=${signal}`, {
         projectId,
@@ -193,48 +197,48 @@ export class ProcessManager {
 
     logger.info(`[ProcessManager] Stopping PID=${entry.child.pid} for project ${projectId}`);
 
-    return new Promise((resolve) => {
+    return new Promise<void>((resolve, reject) => {
       const pid = entry.child.pid;
       let killed = false;
 
       const onExit = () => {
         killed = true;
         clearTimeout(killTimer);
+        clearTimeout(forceTimer);
         resolve();
       };
 
-      entry.child.once('exit', onExit);
+      if (entry.child.exitCode !== null || entry.child.signalCode !== null) { resolve(); return; }
+      entry.child.once('close', onExit);
+
+      const killTimer = setTimeout(() => {
+        entry.child.removeListener('close', onExit);
+        clearTimeout(forceTimer);
+        reject(new Error(`No se pudo detener PID=${pid}. No se reemplazaran archivos mientras siga activo.`));
+      }, 15000);
+      const forceTimer = setTimeout(() => {
+        if (!killed && process.platform !== 'win32') entry.child.kill('SIGKILL');
+      }, 5000);
 
       // Try graceful termination first
       try {
         if (process.platform === 'win32' && pid) {
           // On Windows use taskkill to kill the entire process tree
-          spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { shell: false });
-          // Give taskkill a moment then resolve
-          setTimeout(() => {
-            if (!killed) resolve();
-          }, 2000);
+          execFile('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (error) => {
+            if (error && !killed) {
+              clearTimeout(killTimer); clearTimeout(forceTimer);
+              entry.child.removeListener('close', onExit);
+              reject(new Error(`No se pudo detener PID=${pid}: ${error.message}`));
+            }
+          });
         } else {
           entry.child.kill('SIGTERM');
         }
       } catch (e) {
-        logger.warn(`[ProcessManager] Failed to send SIGTERM: ${e}`);
+        clearTimeout(killTimer); clearTimeout(forceTimer);
+        entry.child.removeListener('close', onExit);
+        reject(e);
       }
-
-      // Force kill after 5 seconds
-      const killTimer = setTimeout(async () => {
-        if (!killed) {
-          try {
-            if (process.platform !== 'win32') {
-              entry.child.kill('SIGKILL');
-            }
-          } catch (e) {
-            // ignore
-          }
-          await ProcessModel.updateStatus(entry.dbRecordId, ProcessStatus.KILLED);
-          resolve();
-        }
-      }, 5000);
     });
   }
 
@@ -297,7 +301,7 @@ export class ProcessManager {
    */
   static getRecentLogs(projectId: string, lines = 100): string[] {
     const entry = registry.get(projectId);
-    if (!entry) return [];
+    if (!entry) return (exitedLogs.get(projectId) ?? []).slice(-lines);
     return entry.logBuffer.slice(-lines);
   }
 

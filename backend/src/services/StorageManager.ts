@@ -58,7 +58,9 @@ export class StorageManager {
 
     // Clean target directory if it exists (re-deployment)
     if (fs.existsSync(projectDir)) {
-      fs.rmSync(projectDir, { recursive: true, force: true });
+      const resolved = path.resolve(projectDir);
+      if (!resolved.startsWith(path.resolve(StorageManager.projectsBase) + path.sep)) throw new Error('Unsafe project directory');
+      await fs.promises.rm(resolved, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     }
     fs.mkdirSync(projectDir, { recursive: true });
 
@@ -93,6 +95,13 @@ export class StorageManager {
 
       if (!isZipEntrySafe(projectDir, normalised)) {
         logger.warn(`[Storage] Zip Slip detected, skipping: "${rawPath}"`);
+        skippedCount++;
+        continue;
+      }
+
+      // Installed dependencies are machine-specific and will be recreated by
+      // the pipeline. Extracting uploaded node_modules/venv can take minutes.
+      if (normalised.split('/').some(part => ['node_modules', 'venv', '.venv', '.git', '__pycache__', '__MACOSX'].includes(part))) {
         skippedCount++;
         continue;
       }
@@ -237,6 +246,9 @@ export class StorageManager {
    */
   static getDistPath(projectId: string, projectPath?: string): string {
     const projectDir = StorageManager.findProjectRoot(projectId, projectPath);
+    if (!fs.existsSync(path.join(projectDir, 'package.json')) && fs.existsSync(path.join(projectDir, 'index.html'))) {
+      return projectDir;
+    }
     const candidates = [
       path.join(projectDir, 'dist'),
       path.join(projectDir, 'build'),
@@ -245,7 +257,8 @@ export class StorageManager {
       path.join(projectDir, 'public'),
     ];
 
-    const found = candidates.find(candidate => fs.existsSync(candidate));
+    // Only serve a directory with an entry point, not an unrelated empty dist/.
+    const found = candidates.find(candidate => fs.existsSync(path.join(candidate, 'index.html')));
     return found ?? path.join(projectDir, 'dist');
   }
 

@@ -1,0 +1,22 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const {Readable}=require('node:stream');
+const unzipper=require('unzipper');
+const {StorageManager}=require('../dist/services/StorageManager');
+test('ZIP extraction preserves source and ignores installed dependency directories',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'mycloud-zip-test-'));
+ const previous=StorageManager.projectsBase;
+ StorageManager.projectsBase=root;
+ t.after(()=>{StorageManager.projectsBase=previous;assert.equal(path.dirname(root),os.tmpdir());assert.ok(path.basename(root).startsWith('mycloud-zip-test-'));fs.rmSync(root,{recursive:true,force:true});});
+ t.mock.method(unzipper.Open,'file',async()=>({files:['index.html','assets/site.css','node_modules/dependency.js','backend/venv/site.py','frontend/.venv/module.py','../outside.txt'].map(name=>({path:name,type:'File',stream:()=>Readable.from(['source'])}))}));
+ const directory=await StorageManager.extractZip('fixture','unused.zip');
+ assert.ok(fs.existsSync(path.join(directory,'index.html')));
+ assert.ok(fs.existsSync(path.join(directory,'assets/site.css')));
+ assert.ok(!fs.existsSync(path.join(directory,'node_modules')));
+ assert.ok(!fs.existsSync(path.join(directory,'backend/venv')));
+ assert.ok(!fs.existsSync(path.join(directory,'frontend/.venv')));
+ assert.ok(!fs.existsSync(path.join(root,'outside.txt')));
+});

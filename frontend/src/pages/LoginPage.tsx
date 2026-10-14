@@ -2,6 +2,7 @@ import { useState, FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { Cloud, Eye, EyeOff, Loader2 } from 'lucide-react'
+import ThemeToggle from '../components/ThemeToggle'
 
 export default function LoginPage() {
   const { login, user } = useAuth()
@@ -34,19 +35,29 @@ export default function LoginPage() {
 
   return (
     <div className="login-page">
+      <div className="login-theme-toggle"><ThemeToggle /></div>
+      <section className="login-intro">
+        <span className="login-brand"><Cloud size={28} /> MyCloud</span>
+        <span className="eyebrow">TU ESPACIO EN LA NUBE</span>
+        <h2>Tus aplicaciones.<br /><span>Todo bajo control.</span></h2>
+        <p>Despliega proyectos, sigue su actividad y administra tu plataforma desde un solo lugar.</p>
+        <div className="login-feature-list"><span>01 <strong>Despliega tus proyectos</strong></span><span>02 <strong>Sigue cada etapa</strong></span><span>03 <strong>Administra tu equipo</strong></span></div>
+      </section>
       <div className="login-box">
         <div className="login-logo">
           <Cloud size={64} />
           <h1>MyCloud</h1>
-          <p>Plataforma PaaS Privada</p>
+          <p>Inicia sesión en tu espacio de trabajo</p>
         </div>
 
         {error && <div className="error-msg">{error}</div>}
 
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label>Email</label>
+            <label htmlFor="login-email">Email</label>
             <input
+              id="login-email"
+              autoComplete="username"
               type="email"
               value={email}
               onChange={e => setEmail(e.target.value)}
@@ -56,9 +67,11 @@ export default function LoginPage() {
             />
           </div>
           <div className="form-group">
-            <label>Contraseña</label>
+            <label htmlFor="login-password">Contraseña</label>
             <div style={{ position: 'relative' }}>
               <input
+                id="login-password"
+                autoComplete="current-password"
                 type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={e => setPassword(e.target.value)}
@@ -67,6 +80,7 @@ export default function LoginPage() {
               />
               <button
                 type="button"
+                aria-label={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
                 onClick={() => setShowPassword(!showPassword)}
                 style={{
                   position: 'absolute',

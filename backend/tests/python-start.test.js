@@ -1,0 +1,46 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const {ProjectAnalyzer}=require('../dist/services/ProjectAnalyzer');
+const {HealthCheckService}=require('../dist/services/HealthCheckService');
+test('fullstack FastAPI starts from backend so app imports and .env resolve there',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'mycloud-python-test-'));
+ t.after(()=>{assert.equal(path.dirname(root),os.tmpdir());assert.ok(path.basename(root).startsWith('mycloud-python-test-'));fs.rmSync(root,{recursive:true,force:true});});
+ fs.mkdirSync(path.join(root,'frontend'));fs.mkdirSync(path.join(root,'backend/app'),{recursive:true});
+ fs.writeFileSync(path.join(root,'frontend/package.json'),JSON.stringify({dependencies:{react:'19'},scripts:{build:'vite build'}}));
+ fs.writeFileSync(path.join(root,'backend/requirements.txt'),'fastapi\nuvicorn');
+ fs.writeFileSync(path.join(root,'backend/app/main.py'),'from app.core import config');
+ const result=await ProjectAnalyzer.analyze(root);
+ assert.equal(result.projectType,'FULLSTACK');
+ assert.equal(result.startWorkingDir,path.join(root,'backend'));
+ assert.equal(result.startCommand,process.platform==='win32'?'python.exe':'python');
+ assert.deepEqual(result.startArgs.slice(0,3),['-m','uvicorn','app.main:app']);
+ assert.equal(result.buildCommand,'npm --prefix frontend run build');
+ assert.ok(!result.startArgs.includes('--working-dir-hint'));
+});
+test('health check immediately returns original process error after a crash',async t=>{
+ const check=t.mock.method(HealthCheckService,'check',async()=>{throw Error('Should not probe a dead process');});
+ const result=await HealthCheckService.waitForHealthy(4006,10,0,()=> 'El proceso terminó: ModuleNotFoundError');
+ assert.equal(result.healthy,false);assert.match(result.error,/ModuleNotFoundError/);assert.equal(check.mock.callCount(),0);
+});
+test('restarting a deployed static site preserves its artifact despite an optional Python backend',async t=>{
+ const {DeploymentService}=require('../dist/services/DeploymentService');
+ const {ProjectModel}=require('../dist/models/ProjectModel');
+ const {EnvVarModel}=require('../dist/models/EnvVarModel');
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'mycloud-static-restart-'));
+ t.after(()=>{assert.equal(path.dirname(root),os.tmpdir());assert.ok(path.basename(root).startsWith('mycloud-static-restart-'));fs.rmSync(root,{recursive:true,force:true});});
+ fs.mkdirSync(path.join(root,'frontend'));fs.mkdirSync(path.join(root,'backend/app'),{recursive:true});fs.mkdirSync(path.join(root,'dist'));
+ fs.writeFileSync(path.join(root,'frontend/package.json'),JSON.stringify({dependencies:{react:'19'},scripts:{build:'vite build'}}));
+ fs.writeFileSync(path.join(root,'backend/requirements.txt'),'fastapi');fs.writeFileSync(path.join(root,'backend/app/main.py'),'');
+ fs.writeFileSync(path.join(root,'package.json'),'{}');fs.writeFileSync(path.join(root,'dist/index.html'),'website');
+ t.mock.method(ProjectModel,'findById',async()=>({source_path:root,assigned_port:4004,project_type:'STATIC_FRONTEND'}));
+ t.mock.method(ProjectModel,'updateStatus',async()=>{});
+ t.mock.method(EnvVarModel,'toRecord',async()=>({}));
+ t.mock.method(HealthCheckService,'waitForHealthy',async()=>({healthy:true}));
+ const start=t.mock.method(DeploymentService,'_startProcess',async()=>123);
+ await DeploymentService.startProject('test');
+ assert.equal(start.mock.calls[0].arguments[0].projectType,'STATIC_FRONTEND');
+ assert.equal(start.mock.calls[0].arguments[0].startCommand,'__STATIC_SERVER__');
+});

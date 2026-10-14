@@ -4,6 +4,7 @@ import { projectsApi } from '../api/projects'
 import { Project } from '../types'
 import StatusBadge from '../components/StatusBadge'
 import { useAuth } from '../hooks/useAuth'
+import { useProjectUrl } from '../hooks/useProjectUrl'
 import {
   Play,
   Pause,
@@ -25,6 +26,7 @@ export default function ProjectDetail() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
   const [project, setProject] = useState<Project | null>(null)
+  const projectUrl = useProjectUrl(project)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [actionMsg, setActionMsg] = useState('')
@@ -223,7 +225,7 @@ export default function ProjectDetail() {
               <span>
                 {project.assigned_port ? (
                   <a
-                    href={`http://localhost:${project.assigned_port}`}
+                    href={projectUrl ?? undefined}
                     target="_blank"
                     rel="noreferrer"
                     className="url-link"
@@ -248,17 +250,17 @@ export default function ProjectDetail() {
               <Globe size={14} />
               <label>URL</label>
               <span>
-                {project.url || (project.assigned_port && project.status === 'RUNNING') ? (
+                {projectUrl ? (
                   <a
-                    href={project.url ?? `http://localhost:${project.assigned_port}`}
+                    href={projectUrl}
                     target="_blank"
                     rel="noreferrer"
                     className="url-link"
                   >
-                    {project.url ?? `http://localhost:${project.assigned_port}`} ↗
+                    {projectUrl} ↗
                   </a>
                 ) : (
-                  '—'
+                  project.status === 'RUNNING' ? 'Preparando enlace público…' : '—'
                 )}
               </span>
             </div>

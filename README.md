@@ -1,6 +1,42 @@
 # AWS-CLOUD
 
+## Arranque local en esta maquina
+
+### Iniciar con terminales y tunel Cloudflare
+
+Haz doble clic en `iniciar.bat` (o ejecuta `.\iniciar.bat` desde PowerShell). Inicia PostgreSQL si hace falta, abre una terminal para el backend y otra para el frontend, espera respuestas HTTP de ambos y del proxy `/api`, y entonces crea un Quick Tunnel HTTPS al panel en el puerto 5173. La primera ejecucion descarga `cloudflared` oficial en `.local/` si no esta instalado. Si los servidores ya estan activos, los reutiliza sin reiniciarlos.
+
+Copia el enlace `https://....trycloudflare.com` mostrado en la terminal de inicio. Manten tu maquina y las terminales encendidas. Ctrl+C en la terminal del tunel cierra el acceso publico. La direccion cambia en cada ejecucion. Para comprobar los requisitos sin iniciar servicios ni publicar el tunel, ejecuta `.\iniciar.bat -CheckOnly`.
+
+El enlace publica el **panel MyCloud**, cuya API pasa por el proxy de Vite. Ademas, `publicar-proyectos.ps1` mantiene un tunel HTTPS propio para cada proyecto local en estado RUNNING y con puerto asignado. El panel lee sus enlaces desde `frontend/public/project-tunnels.json`; el gestor comprueba las direcciones antes de publicarlas y revisa cambios cada 15 segundos. Puedes iniciar ese gestor por separado sin reiniciar el panel. Sus logs quedan en `.local/project-tunnels.stdout.log` y `.local/tunnel-project-*.log`. `stop-local.ps1` detiene estos tuneles. Las direcciones son temporales y cambian al recrear el tunel; las aplicaciones quedan accesibles a cualquiera que tenga el enlace, con la autenticacion que implemente cada aplicacion. Los Quick Tunnels son para pruebas y no admiten SSE; para logs en streaming y una direccion estable usa un tunel administrado con dominio. Referencia: https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/.
+
+El entorno local esta preparado con PostgreSQL portatil en `.local/` y configuracion privada en `backend/.env` y `frontend/.env`.
+
+Desde PowerShell, en la raiz del proyecto:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start-local.ps1
+```
+
+Abre http://localhost:5173. Usa `ADMIN_EMAIL` y `ADMIN_PASSWORD` del archivo `backend/.env` para iniciar sesion. La API responde en http://localhost:3001/api/health. Los logs de arranque estan en `.local/`.
+
+Para detener los servicios locales:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\stop-local.ps1
+```
+
+Si modificas el backend, ejecuta `npm run build` en `backend/` y reinicia los servicios. El frontend se actualiza automaticamente con Vite. No borres `.local/pgdata`: contiene la base de datos persistente. Los scripts requieren que este entorno local ya este preparado; no instalan PostgreSQL en otras maquinas.
+
 ## MyCloud — Private Native PaaS Platform (Zero Docker)
+
+### Versiones y lenguajes en el entorno local
+
+- **Node.js en Windows:** cada proyecto puede declarar `.nvmrc`, `.node-version` o `engines.node` en `package.json`. Se combinan estas restricciones con los requisitos de las dependencias directas del `package-lock.json`. MyCloud utiliza una versión compatible para instalar dependencias, compilar y arrancar. Si hace falta, descarga un runtime oficial de Node, verifica SHA256 y lo conserva en `.local/node-runtimes/`. La primera descarga necesita conexión a Internet. No modifica el Node global. Admite versiones numéricas, rangos semver, `node`, `lts/*` y alias como `lts/iron`; falla con un mensaje explícito si los requisitos se contradicen o no hay binario compatible.
+- **Python, Java y PHP:** usan los runtimes instalados en el PATH de la máquina. Se comprueba su disponibilidad antes de instalar o compilar, junto con pip, Maven, Gradle o Composer cuando el proyecto los requiere. `.python-version` y `.java-version` permiten comprobar la versión instalada; no descargan ni cambian automáticamente esos runtimes. Python admite instalación desde `requirements.txt` o `pyproject.toml`.
+- **HTML/CSS/JavaScript sin manifiesto:** se sirve directamente, sin npm ni build.
+
+Esto cubre los lenguajes y estructuras que reconoce el analizador. No garantiza ejecutar cualquier framework o lenguaje; cada aplicación debe tener un comando de inicio válido y sus herramientas de sistema disponibles. La selección local de Node no configura el runtime de Vercel.
 
 MyCloud es una plataforma PaaS (Platform as a Service) privada de grado de producción inspirada conceptualmente en AWS/Railway/Vercel, diseñada y desarrollada 100% desde cero en **Node.js, Express, TypeScript, PostgreSQL y React/Vite**, sin dependencias de Docker ni virtualización de contenedores.
 
